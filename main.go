@@ -29,9 +29,9 @@ func main() {
 }
 
 func registerHandlerFunctions(mux *http.ServeMux, cfg *apiConfig) {
-	mux.HandleFunc("GET /healthz", HandlerHealthz)
-	mux.HandleFunc("GET /metrics", cfg.displayMetrics())
-	mux.HandleFunc("POST /reset", cfg.reset())
+	mux.HandleFunc("GET /api/healthz", HandlerHealthz)
+	mux.HandleFunc("GET /admin/metrics", cfg.displayMetrics())
+	mux.HandleFunc("POST /admin/reset", cfg.reset())
 }
 
 func HandlerHealthz(w http.ResponseWriter, req *http.Request) {
@@ -55,11 +55,17 @@ func (a *apiConfig) reset() func (http.ResponseWriter, *http.Request) {
 
 func (a *apiConfig) displayMetrics() func (http.ResponseWriter, *http.Request) {
 	return func (w http.ResponseWriter, req *http.Request) {
-		text := ""
-		text += fmt.Sprintf("Hits: %v\n", a.fileserverHits.Load())
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		contents := fmt.Sprintf(`
+			<html>
+			  <body>
+				<h1>Welcome, Chirpy Admin</h1>
+				<p>Chirpy has been visited %d times!</p>
+			  </body>
+			</html>
+			`, a.fileserverHits.Load())
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
-		io.WriteString(w, text)
+		io.WriteString(w, contents)
 	}
 }
 
