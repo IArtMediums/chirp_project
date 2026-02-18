@@ -15,12 +15,14 @@ import (
 	"database/sql"
 	"github.com/IArtMediums/chirp_project/internal/database"
 	"github.com/joho/godotenv"
+	"github.com/IArtMediums/chirp_project/internal/auth"
 )
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbQueries *database.Queries
 	platform string
+	secret string
 }
 
 var port string = "8080"
@@ -39,6 +41,7 @@ func main() {
 		fileserverHits: atomic.Int32{}, 
 		dbQueries: database.New(db), 
 		platform: os.Getenv("PLATFORM"), 
+		secret: os.Getenv("SECRET"),
 	}
 	mux.Handle(filePathRoot, config.middlewareMetricsInc(GetFileServerHandler()))
 	registerHandlerFunctions(mux, config)
@@ -57,9 +60,158 @@ func registerHandlerFunctions(mux *http.ServeMux, cfg *apiConfig) {
 	mux.HandleFunc("GET /admin/metrics", cfg.displayMetrics())
 	mux.HandleFunc("POST /admin/reset", cfg.reset())
 	mux.HandleFunc("POST /api/users", cfg.middlewareCfg(HandlerCreateUser))
-	mux.HandleFunc("POST /api/chirps", cfg.middlewareCfg(HandlerCreateChirp))
+	mux.HandleFunc("POST /api/chirps", cfg.middlewareAuthCfg(HandlerCreateChirp))
 	mux.HandleFunc("GET /api/chirps", cfg.middlewareCfg(HandlerGetAllChirps))
 	mux.HandleFunc("GET /api/chirps/{chirpID}", cfg.middlewareCfg(HandlerGetChirpByChirpID))
+	mux.HandleFunc("POST /api/login", cfg.middlewareCfg(HandlerLogin))
+	mux.HandleFunc("POST /api/refresh", cfg.middlewareCfg(HandlerRefreshToken))
+	mux.HandleFunc("POST /api/revoke", cfg.middlewareCfg(HandlerRevoke))
+}
+
+func HandlerRevoke(w http.ResponseWriter, r *http.Request, cfg *apiConfig) {
+	refToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		log.Printf("%v\n", err)
+		w.WriteHeader(401)
+		return
+	}
+	ctx := context.Background()
+	if err := cfg.dbQueries.RevokeToken(ctx, refToken); err != nil {
+		log.Printf("%v\n", err)
+		w.WriteHeader(401)
+		return
+	}
+	w.WriteHeader(204)
+}
+
+func HandlerRefreshToken(w http.ResponseWriter, r *http.Request, cfg *apiConfig) {
+	type response struct {
+		Token string `json:"token"`
+	}
+	refToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		log.Printf("%v\n", err)
+		w.WriteHeader(401)
+		return
+	}
+	ctx := context.Background()
+	id, err := cfg.dbQueries.GetUserFromRefreshToken(ctx, refToken)
+	if err != nil {
+		log.Printf("%v\n", err)
+		w.WriteHeader(401)
+		return
+	}
+	acToken, err := CreateAccessToken(id, cfg)
+	if err != nil {
+		log.Printf("%v\n", err)
+		w.WriteHeader(500)
+		return
+	}
+	res := response{
+		Token: acToken,
+	}
+	data, err := json.Marshal(&res)
+	if err != nil {
+		log.Printf("%v\n", err)
+		w.WriteHeader(500)
+		return
+	}
+	w.WriteHeader(200)
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(data)
+}
+
+func HandlerLogin(w http.ResponseWriter, r *http.Request, cfg *apiConfig) {
+	type request struct {
+		Email				string			`json:"email"`
+		Password			string			`json:"password"`
+	}
+	type response struct {
+		ID				uuid.UUID	`json:"id"`
+		CreatedAt		time.Time	`json:"created_at"`
+		UpdatedAt		time.Time	`json:"updated_at"`
+		Email			string		`json:"email"`
+		Token			string		`json:"token"`
+		RefreshToken	string		`json:"refresh_token"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	req := request{}
+	if err := decoder.Decode(&req); err != nil {
+		log.Printf("%v\n", err)
+		w.WriteHeader(500)
+		return
+	}
+	ctx := context.Background()
+	user, err := cfg.dbQueries.GetUserByEmail(ctx, req.Email)
+	if err != nil {
+		log.Printf("%v\n", err)
+		w.WriteHeader(404)
+		return
+	}
+	match, err := auth.CheckPasswordHash(req.Password, user.HashedPassword)
+	if err != nil {
+		log.Printf("%v\n", err)
+		w.WriteHeader(500)
+		return
+	}
+	if !match {
+		w.WriteHeader(401)
+		return
+	}
+	acToken, err := CreateAccessToken(user.ID, cfg)
+	refToken, err := CreateRefreshToken(user.ID, cfg)
+	if err != nil {
+		log.Printf("%v\n", err)
+		w.WriteHeader(500)
+		return
+	}
+	res := response{
+		ID: user.ID,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+		Email: user.Email,
+		Token: acToken,
+		RefreshToken: refToken,
+	}
+	data, err := json.Marshal(&res)
+	if err != nil {
+		log.Printf("%v\n", err)
+		w.WriteHeader(500)
+		return
+	}
+	w.WriteHeader(200)
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(data)
+}
+
+func CreateAccessToken(id uuid.UUID, cfg *apiConfig) (string, error) {
+	duration, err := time.ParseDuration("1h")
+	if err != nil {
+		return "", err
+	}
+	acToken, err := auth.MakeJWT(id, cfg.secret, duration)
+	if err != nil {
+		return "", err
+	}
+	return acToken, nil
+}
+
+func CreateRefreshToken(id uuid.UUID, cfg *apiConfig) (string, error) {
+	refToken := auth.MakeRefreshToken()
+	ctx := context.Background()
+	params := database.CreateTokenParams{
+		Token: refToken,
+		UserID: id,
+	}
+	_, err := cfg.dbQueries.CreateToken(ctx, params)
+	if err != nil {
+		return "", err
+	}
+	return refToken, nil
+}
+
+func RefreshToken(refToken string, cfg *apiConfig) (uuid.UUID, error) {
+	return uuid.Nil, nil
 }
 
 func HandlerGetChirpByChirpID(w http.ResponseWriter, r *http.Request, cfg *apiConfig) {
@@ -141,6 +293,7 @@ func HandlerGetAllChirps(w http.ResponseWriter, r *http.Request, cfg *apiConfig)
 func HandlerCreateUser(w http.ResponseWriter, r *http.Request, cfg *apiConfig) {
 	type request struct {
 		Email     string	`json:"email"`
+		Password  string	`json:"password"`
 	}
 	type response struct {
 		ID        uuid.UUID `json:"id"`
@@ -156,7 +309,17 @@ func HandlerCreateUser(w http.ResponseWriter, r *http.Request, cfg *apiConfig) {
 		return
 	}
 	ctx := context.Background()
-	user, err := cfg.dbQueries.CreateUser(ctx, req.Email)
+	hash, err := auth.HashPassword(req.Password)
+	if err != nil {
+		log.Printf("%v\n", err)
+		w.WriteHeader(500)
+		return
+	}
+	params := database.CreateUserParams{
+		Email: req.Email,
+		HashedPassword: hash,
+	}
+	user, err := cfg.dbQueries.CreateUser(ctx, params)
 	if err != nil {
 		log.Printf("%v\n", err)
 		w.WriteHeader(500)
@@ -179,7 +342,7 @@ func HandlerCreateUser(w http.ResponseWriter, r *http.Request, cfg *apiConfig) {
 	w.Write(data)
 }
 
-func HandlerCreateChirp(w http.ResponseWriter, r *http.Request, cfg *apiConfig) {
+func HandlerCreateChirp(w http.ResponseWriter, r *http.Request, cfg *apiConfig, id uuid.UUID) {
 	type request struct {
 		Body	string		`json:"body"`
 		UserID	uuid.UUID	`json:"user_id"`
@@ -206,7 +369,7 @@ func HandlerCreateChirp(w http.ResponseWriter, r *http.Request, cfg *apiConfig) 
 	ctx := context.Background()
 	params := database.CreateChirpParams{
 		Body: req.Body,
-		UserID: req.UserID,
+		UserID: id,
 	}
 	chirp, err := cfg.dbQueries.CreateChirp(ctx, params)
 	if err != nil {
@@ -319,5 +482,23 @@ func (a *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 func (a *apiConfig) middlewareCfg(handler func (http.ResponseWriter, *http.Request, *apiConfig)) func (http.ResponseWriter, *http.Request) {
 	return func (w http.ResponseWriter, req *http.Request) {
 		handler(w, req, a)
+	}
+}
+
+func (a *apiConfig) middlewareAuthCfg(handler func (http.ResponseWriter, *http.Request, *apiConfig, uuid.UUID)) func (http.ResponseWriter, *http.Request) {
+	return func (w http.ResponseWriter, r *http.Request) {
+		token, err := auth.GetBearerToken(r.Header)
+		if err != nil {
+			log.Printf("%v\n", err)
+			w.WriteHeader(500)
+			return
+		}
+		id, err := auth.ValidateJWT(token, a.secret)
+		if err != nil {
+			log.Printf("%v\n", err)
+			w.WriteHeader(401)
+			return
+		}
+		handler(w, r, a, id)
 	}
 }
