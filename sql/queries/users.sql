@@ -7,7 +7,7 @@ VALUES (
 	$1,
 	$2
 	)
-RETURNING id, created_at, updated_at, email;
+RETURNING id, created_at, updated_at, email, is_chirpy_red;
 
 -- name: ResetUsers :exec
 DELETE FROM users;
@@ -59,3 +59,21 @@ SET revoked_at = NOW(),
 	updated_at = NOW()
 WHERE token = $1
 	AND revoked_at IS NULL;
+
+-- name: UpdateUserLogin :one
+UPDATE users
+SET updated_at = NOW(),
+	email = $1,
+	hashed_password = $2
+WHERE id = $3
+RETURNING id, created_at, updated_at, email, is_chirpy_red;
+
+-- name: DeleteChirp :exec
+DELETE FROM chirps
+WHERE id = $1;
+
+-- name: UpgradeUser :exec
+UPDATE users
+SET is_chirpy_red = true,
+	updated_at = NOW()
+WHERE id = $1;
