@@ -3,6 +3,7 @@ import (
 	_ "github.com/lib/pq"
 	"strings"
 	"time"
+	"sort"
 	"github.com/google/uuid"
 	"context"
 	"log"
@@ -391,9 +392,22 @@ func HandlerGetAllChirps(w http.ResponseWriter, r *http.Request, cfg *apiConfig)
 		Body		string		`json:"body"`
 		UserID		uuid.UUID	`json:"user_id"`
 	}
+	author_id := r.URL.Query().Get("author_id")
+	var get_func func(context.Context) ([]database.Chirp, error)
+	if author_id != "" {
+		get_func = func(c context.Context) ([]database.Chirp, error) {
+			parsed, err := uuid.Parse(author_id)
+			if err != nil {
+				return cfg.dbQueries.GetChirps(c)
+			}
+			return cfg.dbQueries.GetChirpsByAuthor(c, parsed)
+		}
+	} else {
+		get_func = cfg.dbQueries.GetChirps
+	}
 	res := []chirp{}
 	ctx := context.Background()
-	chirps, err := cfg.dbQueries.GetChirps(ctx)
+	chirps, err := get_func(ctx)
 	if err != nil {
 		log.Printf("%v\n", err)
 		w.WriteHeader(500)
@@ -407,6 +421,10 @@ func HandlerGetAllChirps(w http.ResponseWriter, r *http.Request, cfg *apiConfig)
 			Body: c.Body,
 			UserID: c.UserID,
 		})
+	}
+	sortQuery := r.URL.Query().Get("sort")
+	if sortQuery == "desc" {
+		sort.Slice(res, func(i, j int) bool {return res[i].CreatedAt.Compare(res[j].CreatedAt) == 1})
 	}
 	data, err := json.Marshal(&res)
 	if err != nil {
